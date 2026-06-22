@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -77,6 +76,22 @@ INFO  = "INFO"
 SKIP  = "SKIP"
 MANUAL= "MANUAL"   # cannot be automated — requires human eye
 
+CT_EXISTING_CONFIG_DOC = (
+    "https://docs.aws.amazon.com/controltower/latest/userguide/"
+    "existing-config-resources.html"
+)
+CT_BASELINE_CONFIG_RECORDER = "aws-controltower-BaselineConfigRecorder"
+CT_BASELINE_CONFIG_DELIVERY_CHANNEL = "aws-controltower-BaselineConfigDeliveryChannel"
+
+def utc_now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.UTC)
+
+def utc_now_str() -> str:
+    return utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+def utc_stamp() -> str:
+    return utc_now().strftime("%Y%m%d_%H%M%S")
+
 STATUS_COLOUR = {
     PASS:   C.GREEN,
     FAIL:   C.RED,
@@ -110,7 +125,7 @@ STATUS_HTML_BADGE = {
     MANUAL: "#8b5cf6",
 }
 
-TIMESTAMP = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+TIMESTAMP = utc_stamp()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Result store
@@ -405,20 +420,42 @@ def chk_config_recorder(config_client, region: str):
         grp      = rec.get("recordingGroup", {})
         scope    = "ALL_SUPPORTED_RESOURCES" if grp.get("allSupported") else \
                    f"{len(grp.get('resourceTypes',[]))} specific types"
+        if name == CT_BASELINE_CONFIG_RECORDER:
+            status = WARN
+            action = (
+                f"Follow the AWS Control Tower guidance for existing AWS Config resources:\n"
+                f"  {CT_EXISTING_CONFIG_DOC}\n\n"
+                f"This recorder name matches the Control Tower baseline recorder. "
+                f"Do not treat it as a generic delete-before-enrollment case."
+            )
+            emit_msg = (
+                "Control Tower baseline Config recorder detected. "
+                "Review the AWS guidance before making changes."
+            )
+        else:
+            status = FAIL
+            action = (
+                f"Review the AWS Control Tower guidance for existing AWS Config resources first:\n"
+                f"  {CT_EXISTING_CONFIG_DOC}\n\n"
+                f"If this recorder is not an expected Control Tower baseline artifact, "
+                f"plan remediation before enrollment using the documented Control Tower process. "
+                f"Do not delete Config resources blindly without confirming the intended enrollment path."
+            )
+            emit_msg = (
+                f"Pre-existing Config recorder detected in {region}. "
+                f"Review the AWS guidance; this may block CT enrollment."
+            )
 
-        record("AWS Config", f"Configuration Recorder: '{name}'", FAIL,
+        record("AWS Config", f"Configuration Recorder: '{name}'", status,
                f"Region : {region}\n"
                f"Name   : {name}\n"
                f"Role   : {role_arn}\n"
                f"Scope  : {scope}\n"
-               f"⚠ Only ONE recorder allowed per region. CT will FAIL to enroll if this exists.",
-               f"Delete before enrollment:\n"
-               f"  aws configservice delete-configuration-recorder \\\n"
-               f"    --configuration-recorder-name {name} --region {region}\n\n"
-               f"Save your Config history first if needed (export snapshots).",
+               f"⚠ Only ONE recorder allowed per region. Control Tower enrollment handling "
+               f"depends on whether this is an expected baseline artifact or an unmanaged existing recorder.",
+               action,
                region=region)
-        emit(f"Config Recorder '{name}' [{region}]", FAIL,
-             f"CONFLICT — will block CT enrollment. Delete recorder in {region} before proceeding.")
+        emit(f"Config Recorder '{name}' [{region}]", status, emit_msg)
     return False  # conflict found
 
 def chk_config_delivery_channel(config_client, region: str):
@@ -443,22 +480,43 @@ def chk_config_delivery_channel(config_client, region: str):
         bucket = ch.get("s3BucketName", "?")
         sns    = ch.get("snsTopicARN", "N/A")
         freq   = ch.get("configSnapshotDeliveryProperties", {}).get("deliveryFrequency", "N/A")
+        if name == CT_BASELINE_CONFIG_DELIVERY_CHANNEL:
+            status = WARN
+            action = (
+                f"Follow the AWS Control Tower guidance for existing AWS Config resources:\n"
+                f"  {CT_EXISTING_CONFIG_DOC}\n\n"
+                f"This delivery channel name matches the Control Tower baseline delivery channel. "
+                f"Do not treat it as a generic delete-before-enrollment case."
+            )
+            emit_msg = (
+                "Control Tower baseline Config delivery channel detected. "
+                "Review the AWS guidance before making changes."
+            )
+        else:
+            status = FAIL
+            action = (
+                f"Review the AWS Control Tower guidance for existing AWS Config resources first:\n"
+                f"  {CT_EXISTING_CONFIG_DOC}\n\n"
+                f"If this delivery channel is not an expected Control Tower baseline artifact, "
+                f"plan remediation before enrollment using the documented Control Tower process. "
+                f"Do not delete Config resources blindly without confirming the intended enrollment path."
+            )
+            emit_msg = (
+                f"Pre-existing Config delivery channel detected in {region}. "
+                f"Review the AWS guidance; this may block CT enrollment. Bucket: {bucket}."
+            )
 
-        record("AWS Config", f"Delivery Channel: '{name}'", FAIL,
+        record("AWS Config", f"Delivery Channel: '{name}'", status,
                f"Region    : {region}\n"
                f"Name      : {name}\n"
                f"S3 Bucket : {bucket}\n"
                f"SNS Topic : {sns}\n"
                f"Frequency : {freq}\n"
-               f"⚠ Only ONE delivery channel allowed per region. CT enrollment will FAIL.",
-               f"Delete before enrollment:\n"
-               f"  aws configservice delete-delivery-channel \\\n"
-               f"    --delivery-channel-name {name} --region {region}\n\n"
-               f"Important: Preserve any compliance logs in '{bucket}' before deletion.\n"
-               f"CT will create a new channel pointing to the central Log Archive account.",
+               f"⚠ Only ONE delivery channel allowed per region. Control Tower enrollment handling "
+               f"depends on whether this is an expected baseline artifact or an unmanaged existing channel.",
+               action,
                region=region)
-        emit(f"Config Delivery Channel '{name}' [{region}]", FAIL,
-             f"CONFLICT — #1 enrollment blocker. Bucket: {bucket}. Must delete.")
+        emit(f"Config Delivery Channel '{name}' [{region}]", status, emit_msg)
 
 def chk_config_rules(config_client, region: str):
     resp, err = api(config_client.describe_config_rules)
@@ -1169,7 +1227,7 @@ def write_text(account_id: str, regions: list[str]) -> str:
     lines.append("  AWS CONTROL TOWER — MEMBER ACCOUNT PRE-ENROLLMENT READINESS REPORT")
     lines.append(f"  Account  : {account_id}")
     lines.append(f"  Regions  : {', '.join(regions)}")
-    lines.append(f"  Generated: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    lines.append(f"  Generated: {utc_now_str()}")
     lines.append("=" * 80)
     lines.append(f"\n  VERDICT : {v}")
     lines.append(f"  PASS={counts[PASS]}  FAIL={counts[FAIL]}  WARN={counts[WARN]}  "
@@ -1323,7 +1381,7 @@ def write_html(account_id: str, regions: list[str]) -> str:
   <p>
     Account ID: <strong>{account_id}</strong> &nbsp;|&nbsp;
     Regions assessed: {', '.join(regions)} &nbsp;|&nbsp;
-    Generated: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}
+  Generated: {utc_now_str()}
   </p>
 </div>
 
@@ -1425,7 +1483,7 @@ def main():
     # ── Banner
     print(f"\n{C.BOLD}{C.BLUE}╔{'═'*70}╗")
     print(f"║  AWS Control Tower — Member Account Pre-Enrollment Readiness Tool  ║")
-    print(f"║  {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}                                               ║")
+    print(f"║  {utc_now_str()}                                               ║")
     print(f"╚{'═'*70}╝{C.RESET}\n")
     print(f"  {C.DIM}Run this from CloudShell inside the MEMBER account you want to enroll.{C.RESET}")
     print(f"  {C.DIM}Regions to check: {', '.join(check_regions)}{C.RESET}\n")
